@@ -141,16 +141,16 @@ namespace ProjectMT.Contents.CastleRaidHex
             var layers = ResolveDefenseLayerCount(level, seed);
             switch (level)
             {
-                case 1: return Create(1, layers, 2, 0f, 0, 0, 3, 1, 0, 3, 1, 1, 1, 1, 2, 2, 1, 2, 1, 1);
-                case 2: return Create(2, layers, 2, 0f, 0, 0, 4, 1, 0, 3, 2, 1, 1, 1, 3, 2, 1, 2, 2, 1);
-                case 3: return Create(3, layers, 3, 0f, 0, 0, 5, 1, 0, 0, 2, 1, 1, 2, 4, 2, 1, 2, 4, 1);
-                case 4: return Create(4, layers, 3, 0.40f, 1, 1, 6, 1, 1, 12, 2, 2, 1, 2, 5, 2, 1, 4, 2, 2);
-                case 5: return Create(5, layers, 3, 0.70f, 1, 1, 7, 1, 2, 15, 2, 2, 2, 3, 5, 3, 1, 4, 4, 2);
-                case 6: return Create(6, layers, 4, 0.85f, 1, 2, 8, 2, 2, 18, 3, 2, 2, 3, 6, 3, 1, 4, 4, 4);
-                case 7: return Create(7, layers, 4, 1f, 2, 2, 9, 2, 2, 21, 3, 3, 2, 4, 6, 3, 2, 4, 6, 4);
-                case 8: return Create(8, layers, 4, 1f, 2, 2, 10, 2, 2, 24, 3, 3, 3, 4, 7, 3, 2, 6, 6, 4);
-                case 9: return Create(9, layers, 5, 1f, 3, 2, 11, 2, 2, 28, 4, 3, 3, 5, 7, 3, 2, 6, 8, 6);
-                default: return Create(10, layers, 6, 1f, 3, 3, 12, 2, 2, 32, 4, 4, 4, 6, 8, 3, 2, 8, 8, 8);
+                case 1: return Create(1, layers, 2, 0f, 0, 0, 3, 1, 0, 3, 1, 1, 1, 1, 1, 2, 1, 2, 1, 1);
+                case 2: return Create(2, layers, 2, 0f, 0, 0, 4, 1, 0, 3, 2, 1, 1, 1, 2, 2, 1, 2, 2, 1);
+                case 3: return Create(3, layers, 3, 0f, 0, 0, 5, 1, 0, 0, 2, 1, 1, 2, 2, 2, 1, 2, 4, 1);
+                case 4: return Create(4, layers, 3, 0.40f, 1, 1, 6, 1, 1, 12, 2, 2, 1, 2, 2, 2, 1, 4, 2, 2);
+                case 5: return Create(5, layers, 3, 0.70f, 1, 1, 7, 1, 2, 15, 2, 2, 2, 3, 3, 3, 1, 4, 4, 2);
+                case 6: return Create(6, layers, 4, 0.85f, 1, 2, 8, 2, 2, 18, 3, 2, 2, 3, 3, 3, 1, 4, 4, 4);
+                case 7: return Create(7, layers, 4, 1f, 2, 2, 9, 2, 2, 21, 3, 3, 2, 4, 4, 3, 2, 4, 6, 4);
+                case 8: return Create(8, layers, 4, 1f, 2, 2, 10, 2, 2, 24, 3, 3, 3, 4, 4, 3, 2, 6, 6, 4);
+                case 9: return Create(9, layers, 5, 1f, 3, 2, 11, 2, 2, 28, 4, 3, 3, 5, 5, 3, 2, 6, 8, 6);
+                default: return Create(10, layers, 6, 1f, 3, 3, 12, 2, 2, 32, 4, 4, 4, 6, 6, 3, 2, 8, 8, 8);
             }
         }
 

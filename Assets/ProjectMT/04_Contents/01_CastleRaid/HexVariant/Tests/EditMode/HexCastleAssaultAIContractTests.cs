@@ -132,9 +132,9 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
 
             Assert.That(catalog, Is.Not.Null);
             Assert.That(catalog.TryValidate(out var error), Is.True, error);
-            Assert.That(catalog.Entries.Count, Is.EqualTo(42));
-            Assert.That(catalog.Resolve("aru_01").Pattern, Is.EqualTo(HexCastleAssaultPattern.TacticalSupport));
-            Assert.That(catalog.Resolve("aru_01").SupportFocus, Is.EqualTo(HexCastleAssaultSupportFocus.DefenseBuff));
+            Assert.That(catalog.Entries.Count, Is.EqualTo(44));
+            Assert.That(catalog.Resolve("aru_01").Pattern, Is.EqualTo(HexCastleAssaultPattern.ThreatSuppressor));
+            Assert.That(catalog.Resolve("aru_01").SupportFocus, Is.EqualTo(HexCastleAssaultSupportFocus.Adaptive));
             Assert.That(catalog.Resolve("chamchi_01").Pattern, Is.EqualTo(HexCastleAssaultPattern.DefenderHunter));
             Assert.That(catalog.Resolve("castley_01").Pattern, Is.EqualTo(HexCastleAssaultPattern.WallBreaker));
             Assert.That(catalog.Resolve("floria_01").Pattern, Is.EqualTo(HexCastleAssaultPattern.TacticalSupport));
@@ -205,7 +205,7 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
         }
 
         [Test]
-        public void AssaultWorld_PartialDamageInvalidatesRouteOnlyWhenHealthBandChanges()
+        public void AssaultWorld_PartialDamageOnlyReplansNearbyUnitsWithoutDiscardingSharedField()
         {
             var cells = CreateTwoLayerBoard();
             var worldObject = new GameObject("HexAssaultWorld");
@@ -220,15 +220,19 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
             unit.RefreshStrategicDecision();
             var wall = unit.CurrentTarget.Structure;
             var fullHealthTopology = world.TopologyVersion;
+            var cachedFields = world.CachedRouteFieldCount;
+            var initialCostRevision = world.CostRevision;
 
             Assert.That(wall.ApplyDamage(20f, wall.transform.position), Is.True);
             Assert.That(world.TopologyVersion, Is.EqualTo(fullHealthTopology),
                 "같은 25% 체력 구간의 작은 피해는 경로장을 매번 폐기하면 안 됩니다.");
 
             Assert.That(wall.ApplyDamage(30f, wall.transform.position), Is.True);
-            Assert.That(world.TopologyVersion, Is.GreaterThan(fullHealthTopology),
-                "벽 체력이 다음 비용 구간으로 내려가면 경로 비용을 다시 계산해야 합니다.");
-            Assert.That(world.CachedRouteFieldCount, Is.Zero);
+            Assert.That(world.TopologyVersion, Is.EqualTo(fullHealthTopology),
+                "남은 HP 변화는 통행 연결을 바꾸지 않으므로 공유 위상 버전을 올리면 안 됩니다.");
+            Assert.That(world.CostRevision, Is.GreaterThan(initialCostRevision));
+            Assert.That(world.CachedRouteFieldCount, Is.EqualTo(cachedFields),
+                "남은 HP는 주변 후보에서 정확히 다시 계산하고 공유 비용장은 보존해야 합니다.");
             Assert.That(unit.NeedsStrategicDecision, Is.True);
         }
 
@@ -397,7 +401,7 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
         }
 
         [Test]
-        public void AttackSlotLease_AssignsDifferentApproachesToSameWall()
+        public void AttackSlotLease_AssignsDifferentSpatialSlotsToSameWall()
         {
             var cells = CreateTwoLayerBoard();
             var worldObject = new GameObject("HexAssaultWorld");
@@ -411,7 +415,116 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
             Assert.That(world.TryResolveDecision(first, out var firstDecision), Is.True);
             Assert.That(world.TryResolveDecision(second, out var secondDecision), Is.True);
             Assert.That(firstDecision.Target.Structure, Is.EqualTo(secondDecision.Target.Structure));
-            Assert.That(firstDecision.Approach, Is.Not.EqualTo(secondDecision.Approach));
+            Assert.That(firstDecision.SlotLease.IsValid, Is.True);
+            Assert.That(secondDecision.SlotLease.IsValid, Is.True);
+            Assert.That(firstDecision.SlotLease.Key, Is.Not.EqualTo(secondDecision.SlotLease.Key));
+        }
+
+        [Test]
+        public void CommittedTarget_WhenAttackSlotsAreFull_UsesRankedInnerAlternativeAndKeepsCohort()
+        {
+            var cells = CreateTwoLayerBoard();
+            var worldObject = new GameObject("HexAssaultWorld");
+            owned.Add(worldObject);
+            var world = worldObject.AddComponent<HexCastleAssaultWorld>();
+            world.Configure(cells, 1f, 2, null, null, 19319);
+            var start = HexCoordinates.Directions[0] * 4;
+            var unit = CreateAssaultUnit(world, cells, start, "kimhyeona_01");
+            SetPrivateAutoProperty(unit, "ExpectedDefenseLayer", 1);
+            SetPrivateAutoProperty(unit, "HasSelectedInitialWall", true);
+            unit.RefreshStrategicDecision();
+
+            var saturated = unit.CurrentTarget.Structure;
+            Assert.That(saturated, Is.Not.Null);
+            Assert.That(saturated.DefenseLayer, Is.EqualTo(1));
+            var previousRoute = unit.RouteId;
+            var previousCohort = CohortId(world, unit);
+            world.SlotAllocator.ReleaseOwner(unit, true);
+            var reserved = FillAttackPositions(world, cells, saturated, unit);
+            Assert.That(reserved, Is.GreaterThanOrEqualTo(3),
+                "주 공격면의 세 자리를 포함해 도달 가능한 공격 자리를 먼저 포화해야 합니다.");
+
+            var temptingOuter = cells.Values
+                .Where(value => value.IsAlive && value.DefenseLayer == 2)
+                .OrderBy(value => start.DistanceTo(value.Coordinates))
+                .First();
+            temptingOuter.ApplyDamage(temptingOuter.MaxHealth - 1f, temptingOuter.transform.position);
+            unit.RequestStrategicDecision(true);
+            unit.RefreshStrategicDecision();
+
+            Assert.That(unit.CurrentTarget.IsValid, Is.True);
+            Assert.That(unit.CurrentTarget.Structure, Is.Not.SameAs(saturated));
+            Assert.That(unit.CurrentTarget.Structure, Is.Not.SameAs(temptingOuter),
+                "자리 포화 대체 목표가 낮은 HP만 보고 이미 지난 바깥 방어층으로 후퇴하면 안 됩니다.");
+            Assert.That(unit.CurrentTarget.Structure.DefenseLayer, Is.LessThanOrEqualTo(1));
+            Assert.That(unit.RouteId, Is.EqualTo(previousRoute));
+            Assert.That(CohortId(world, unit), Is.EqualTo(previousCohort));
+            Assert.That(unit.CurrentIntent, Is.EqualTo(HexCastleAssaultIntentKind.Progress));
+            var trace = new List<HexAssaultTraceEvent>();
+            world.Trace.CopyAfter(0, trace);
+            Assert.That(trace.Any(value => value.Kind == HexAssaultTraceKind.CohortReassigned), Is.False,
+                "공격 자리 포화로 대체 목표를 선택해도 경로 공유 부대는 유지해야 합니다.");
+        }
+
+        [Test]
+        public void CommittedTarget_WhenStrategicAlternativesAreUnavailable_UsesTemporaryLocalWorkWithoutReassigningCohort()
+        {
+            var cells = CreateTwoLayerBoard();
+            var start = HexCoordinates.Directions[0] * 4;
+            var localWorkCoordinates = new HexCoordinates(4, -1);
+            cells[localWorkCoordinates] = CreateRuntime(new HexCastleCell(
+                localWorkCoordinates,
+                HexCastleCellKind.Building,
+                defenseLayer: 1,
+                hitPoints: 15f,
+                initialBlocked: true,
+                buildingRole: HexCastleBuildingRole.Blocker,
+                placementDensity: HexCastlePlacementDensity.Sparse,
+                buildingGrade: 1,
+                placementId: "LOCAL_WORK"));
+            var localWork = cells[localWorkCoordinates];
+            var worldObject = new GameObject("HexAssaultWorld");
+            owned.Add(worldObject);
+            var world = worldObject.AddComponent<HexCastleAssaultWorld>();
+            world.Configure(cells, 1f, 2, null, null, 19320);
+            var unit = CreateAssaultUnit(world, cells, start, "kimhyeona_01");
+            SetPrivateAutoProperty(unit, "ExpectedDefenseLayer", 1);
+            SetPrivateAutoProperty(unit, "HasSelectedInitialWall", true);
+            unit.RefreshStrategicDecision();
+
+            var committed = unit.CommittedTarget;
+            Assert.That(committed.Structure, Is.Not.Null);
+            Assert.That(IsAliveRingWall(committed.Structure), Is.True);
+            var originalCohort = CohortId(world, unit);
+            var originalRoute = unit.RouteId;
+            world.SlotAllocator.ReleaseOwner(unit, true);
+            foreach (var wall in cells.Values.Where(value =>
+                         IsAliveRingWall(value) && value != committed.Structure).ToArray())
+            {
+                wall.ApplyDamage(wall.MaxHealth, wall.transform.position);
+            }
+            Assert.That(FillAttackPositions(world, cells, committed.Structure, unit), Is.GreaterThanOrEqualTo(3));
+            var traceStart = world.Trace.LastSequence;
+
+            unit.RequestStrategicDecision(true);
+            unit.RefreshStrategicDecision();
+
+            Assert.That(unit.CurrentTarget.Structure, Is.SameAs(localWork));
+            Assert.That(unit.CurrentIntent, Is.EqualTo(HexCastleAssaultIntentKind.LocalFallback));
+            Assert.That(unit.CommittedTarget.InstanceId, Is.EqualTo(committed.InstanceId),
+                "4순위 지역 공격은 전략 목표를 교체하면 안 됩니다.");
+            Assert.That(unit.RouteId, Is.EqualTo(originalRoute));
+            Assert.That(CohortId(world, unit), Is.EqualTo(originalCohort),
+                "4순위 지역 공격은 기존 부대를 유지해야 합니다.");
+            var trace = new List<HexAssaultTraceEvent>();
+            world.Trace.CopyAfter(traceStart, trace);
+            Assert.That(trace.Any(value => value.Kind == HexAssaultTraceKind.CohortReassigned), Is.False);
+
+            unit.RequestStrategicDecision(true);
+            unit.RefreshStrategicDecision();
+            Assert.That(unit.CurrentTarget.Structure, Is.SameAs(localWork),
+                "주 목표가 계속 포화된 동안에는 같은 임시 공격을 유지해야 합니다.");
+            Assert.That(CohortId(world, unit), Is.EqualTo(originalCohort));
         }
 
         [Test]
@@ -468,7 +581,7 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
         }
 
         [Test]
-        public void InitialBreach_UsesNearestThreeWithDescendingWeightedFrequency()
+        public void InitialBreach_UsesDeterministicFastestCompletionInsteadOfWeightedRandom()
         {
             var cells = CreateTwoLayerBoard();
             var worldObject = new GameObject("HexAssaultWorld");
@@ -483,23 +596,96 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
                 .ThenBy(value => value.Coordinates)
                 .Take(3)
                 .ToArray();
-            var counts = new int[3];
+            HexCastleCellRuntime selectedTarget = null;
 
-            for (var index = 0; index < 180; index++)
+            for (var index = 0; index < 30; index++)
             {
                 var unit = CreateAssaultUnit(world, cells, start, "castley_01");
                 unit.RefreshStrategicDecision();
                 var selected = System.Array.IndexOf(nearestThree, unit.CurrentTarget.Structure);
                 Assert.That(selected, Is.InRange(0, 2));
-                counts[selected]++;
+                if (selectedTarget == null) selectedTarget = unit.CurrentTarget.Structure;
+                else Assert.That(unit.CurrentTarget.Structure, Is.SameAs(selectedTarget));
                 world.UnregisterUnit(unit);
             }
+        }
 
-            Assert.That(counts[0], Is.GreaterThan(counts[1]));
-            Assert.That(counts[1], Is.GreaterThan(counts[2]));
-            Assert.That(counts[0], Is.InRange(75, 120));
-            Assert.That(counts[1], Is.InRange(35, 75));
-            Assert.That(counts[2], Is.InRange(15, 45));
+        [Test]
+        public void InitialBreach_MoveSpeedDoesNotOverrideDeploymentFrontForDamagedDistantWall()
+        {
+            var start = HexCoordinates.Directions[0] * 7;
+            var slowCells = CreateTwoLayerBoard();
+            var slowFar = slowCells.Values
+                .Where(value => value.IsAlive && value.DefenseLayer == 2)
+                .OrderByDescending(value => start.DistanceTo(value.Coordinates))
+                .ThenBy(value => value.Coordinates)
+                .First();
+            slowFar.ApplyDamage(slowFar.MaxHealth - 1f, slowFar.transform.position);
+            var slowRoot = new GameObject("SlowAssaultWorld");
+            owned.Add(slowRoot);
+            var slowWorld = slowRoot.AddComponent<HexCastleAssaultWorld>();
+            slowWorld.Configure(slowCells, 1f, 2, null, null, 19317);
+            var slow = CreateAssaultUnit(slowWorld, slowCells, start, "castley_01", moveSpeed: 0.5f);
+            slow.RefreshStrategicDecision();
+            Assert.That(slow.CurrentTarget.Structure, Is.Not.SameAs(slowFar),
+                "느린 병력은 낮은 HP만 보고 먼 벽까지 우회하면 안 됩니다.");
+            Assert.That(slow.HasBreachCostEvaluation, Is.True);
+            Assert.That(slow.LastBreachMovementSeconds, Is.GreaterThan(0f));
+            Assert.That(slow.LastBreachDestructionSeconds, Is.GreaterThan(0f));
+            Assert.That(slow.LastBreachTotalSeconds,
+                Is.EqualTo(slow.LastBreachMovementSeconds + slow.LastBreachDestructionSeconds).Within(0.0001f));
+            Assert.That(slow.LastBreachMovementSeconds * 1000f,
+                Is.EqualTo(Mathf.Round(slow.LastBreachMovementSeconds * 1000f)).Within(0.001f));
+            Assert.That(slow.LastBreachDestructionSeconds * 1000f,
+                Is.EqualTo(Mathf.Round(slow.LastBreachDestructionSeconds * 1000f)).Within(0.001f),
+                "돌파 비교값은 초 단위 부동소수점이 아니라 정수 ms 경계로 고정되어야 합니다.");
+
+            var fastCells = CreateTwoLayerBoard();
+            var fastFar = fastCells.Values
+                .Where(value => value.IsAlive && value.DefenseLayer == 2)
+                .OrderByDescending(value => start.DistanceTo(value.Coordinates))
+                .ThenBy(value => value.Coordinates)
+                .First();
+            fastFar.ApplyDamage(fastFar.MaxHealth - 1f, fastFar.transform.position);
+            var fastRoot = new GameObject("FastAssaultWorld");
+            owned.Add(fastRoot);
+            var fastWorld = fastRoot.AddComponent<HexCastleAssaultWorld>();
+            fastWorld.Configure(fastCells, 1f, 2, null, null, 19317);
+            var fast = CreateAssaultUnit(fastWorld, fastCells, start, "castley_01", moveSpeed: 12f);
+            fast.RefreshStrategicDecision();
+            Assert.That(fast.CurrentTarget.Structure, Is.Not.SameAs(fastFar),
+                "빠른 병력도 소환 위치의 공략 전면을 버리고 성 반대편으로 이동하면 안 됩니다.");
+            Assert.That(fast.CurrentTarget.Coordinates.DistanceTo(new HexCoordinates(5, 0)), Is.LessThanOrEqualTo(1));
+            Assert.That(fast.LastBreachMovementSeconds, Is.GreaterThan(0f));
+            Assert.That(fast.LastBreachMovementSeconds, Is.LessThan(slow.LastBreachMovementSeconds),
+                "같은 전면에서도 실제 이동 속도를 접근 비용에 반영해야 합니다.");
+        }
+
+        [Test]
+        public void InitialBreach_DistantCommittedDpsDoesNotDiscountUnrelatedWall()
+        {
+            var cells = CreateTwoLayerBoard();
+            var worldObject = new GameObject("HexAssaultWorld");
+            owned.Add(worldObject);
+            var world = worldObject.AddComponent<HexCastleAssaultWorld>();
+            world.Configure(cells, 1f, 2, null, null, 19318);
+
+            var east = HexCoordinates.Directions[0] * 7;
+            var west = HexCoordinates.Directions[3] * 7;
+            var distantAttacker = CreateAssaultUnit(
+                world, cells, west, "castley_01", moveSpeed: 3f, damage: 10000f);
+            distantAttacker.RefreshStrategicDecision();
+            var distantTarget = distantAttacker.CurrentTarget.Structure;
+
+            var local = CreateAssaultUnit(
+                world, cells, east, "castley_01", moveSpeed: 3f, damage: 1f);
+            local.RefreshStrategicDecision();
+
+            Assert.That(east.DistanceTo(distantTarget.Coordinates), Is.GreaterThan(6));
+            Assert.That(local.CurrentTarget.Structure, Is.Not.SameAs(distantTarget),
+                "성 반대편 병력의 높은 DPS가 새 병력의 후보 비용을 깎아 같은 벽으로 끌어당기면 안 됩니다.");
+            Assert.That(local.CurrentTarget.Structure.Coordinates.DistanceTo(east),
+                Is.LessThan(distantTarget.Coordinates.DistanceTo(east)));
         }
 
         [Test]
@@ -734,7 +920,10 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
             IReadOnlyDictionary<HexCoordinates, HexCastleCellRuntime> cells,
             HexCoordinates start,
             string monsterId,
-            float attackRange = 1.1f)
+            float attackRange = 1.1f,
+            float moveSpeed = 3f,
+            float damage = 20f,
+            float attackInterval = 1f)
         {
             var root = new GameObject($"Assault_{monsterId}_{owned.Count}");
             owned.Add(root);
@@ -750,12 +939,82 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
                     new UnitStatsSnapshot
                     {
                         maxHealth = 100f,
-                        damage = 20f,
-                        moveSpeed = 3f,
+                        damage = damage,
+                        moveSpeed = moveSpeed,
                         attackRange = attackRange,
-                        attackInterval = 1f
+                        attackInterval = attackInterval
                     }));
             return unit;
+        }
+
+        private int FillAttackPositions(
+            HexCastleAssaultWorld world,
+            IReadOnlyDictionary<HexCoordinates, HexCastleCellRuntime> cells,
+            HexCastleCellRuntime target,
+            HexCastleAssaultUnit observer)
+        {
+            var assaultTarget = new HexCastleAssaultTarget(target, false);
+            var reserved = 0;
+            foreach (var cell in cells.Values
+                         .Where(value => value != null && !value.IsBlocked &&
+                                         value.Coordinates.DistanceTo(target.Coordinates) <= observer.AttackRangeCells)
+                         .OrderBy(value => value.Coordinates))
+            {
+                for (var index = 0; index < world.SlotAllocator.CandidateCount(observer.SlotBodyRadius); index++)
+                {
+                    var blocker = CreateAssaultUnit(world, cells, observer.CurrentCoordinates, "kimhyeona_01");
+                    var key = world.SlotAllocator.Candidate(cell.Coordinates, blocker.SlotBodyRadius, index);
+                    if (!world.CanAttackFromPosition(blocker, assaultTarget, key))
+                    {
+                        continue;
+                    }
+
+                    if (world.SlotAllocator.TryCommit(
+                            blocker,
+                            assaultTarget,
+                            key,
+                            blocker.SlotBodyRadius,
+                            1f,
+                            world.SlotAllocator.Revision,
+                            false,
+                            out _,
+                            out _))
+                    {
+                        reserved++;
+                    }
+                }
+            }
+
+            return reserved;
+        }
+
+        private static bool IsAliveRingWall(HexCastleCellRuntime cell)
+        {
+            return cell != null && cell.IsAlive &&
+                   cell.WallRole != HexCastleWallRole.None &&
+                   cell.WallRole != HexCastleWallRole.Partition &&
+                   (cell.Kind == HexCastleCellKind.Wall ||
+                    cell.Kind == HexCastleCellKind.Tower ||
+                    cell.Kind == HexCastleCellKind.Gate);
+        }
+
+        private static int CohortId(HexCastleAssaultWorld world, HexCastleAssaultUnit unit)
+        {
+            var assignments = (Dictionary<int, HexCastleAssaultCohortAssignment>)typeof(HexCastleAssaultWorld)
+                .GetField("unitCohorts",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?.GetValue(world);
+            return assignments != null && assignments.TryGetValue(unit.GetInstanceID(), out var assignment)
+                ? assignment.CohortId
+                : 0;
+        }
+
+        private static void SetPrivateAutoProperty<T>(HexCastleAssaultUnit unit, string property, T value)
+        {
+            typeof(HexCastleAssaultUnit)
+                .GetField("<" + property + ">k__BackingField",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?.SetValue(unit, value);
         }
 
         private static Transform CreateChild(string name, Transform parent)

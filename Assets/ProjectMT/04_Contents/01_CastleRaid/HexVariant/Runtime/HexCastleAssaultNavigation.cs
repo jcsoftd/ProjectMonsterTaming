@@ -25,8 +25,10 @@ namespace ProjectMT.Contents.CastleRaidHex
             bool hasFirstObstacle,
             int routeId,
             int sectorId,
-            int topologyVersion)
+            int topologyVersion,
+            IReadOnlyList<float> entryCosts = null)
         {
+            EntryCosts = entryCosts ?? Array.Empty<float>();
             Path = path ?? Array.Empty<HexCoordinates>();
             TotalCost = totalCost;
             DestinationApproach = destinationApproach;
@@ -40,6 +42,7 @@ namespace ProjectMT.Contents.CastleRaidHex
 
         public IReadOnlyList<HexCoordinates> Path { get; }
         public float TotalCost { get; }
+        public IReadOnlyList<float> EntryCosts { get; }
         public HexCoordinates DestinationApproach { get; }
         public HexCoordinates FirstObstacle { get; }
         public HexCoordinates FirstObstacleApproach { get; }
@@ -170,8 +173,20 @@ namespace ProjectMT.Contents.CastleRaidHex
         private readonly IReadOnlyDictionary<HexCoordinates, HexCastleCellRuntime> cells;
         private readonly HashSet<HexCoordinates> palaceFootprint;
         private readonly HashSet<HexCoordinates> palaceApproaches;
-        private readonly Dictionary<FieldKey, Dictionary<HexCoordinates, float>> fields =
-            new Dictionary<FieldKey, Dictionary<HexCoordinates, float>>();
+        private sealed class CostFieldSnapshot
+        {
+            public readonly Dictionary<HexCoordinates, float> Costs = new Dictionary<HexCoordinates, float>();
+            public readonly Dictionary<HexCoordinates, float> Entry = new Dictionary<HexCoordinates, float>();
+            public readonly Dictionary<HexCoordinates, HexCoordinates> Next = new Dictionary<HexCoordinates, HexCoordinates>();
+            public long LastUse;
+            public bool CostsDirty;
+        }
+        private readonly Dictionary<FieldKey, CostFieldSnapshot> fields = new Dictionary<FieldKey, CostFieldSnapshot>();
+        private long useSequence;
+        public int MaxCachedFields { get; set; } = 64;
+        public int FieldBuildCount { get; private set; }
+        public int FieldReuseCount { get; private set; }
+        public bool LastQueryReused { get; private set; }
         private readonly float cellTravelDistance;
 
         public HexCastleAssaultNavigationSnapshot(
@@ -211,6 +226,61 @@ namespace ProjectMT.Contents.CastleRaidHex
             fields.Clear();
         }
 
+        public void InvalidateCosts()
+        {
+            foreach (var field in fields.Values) field.CostsDirty = true;
+        }
+
+        public int FrontRouteBuildCount { get; private set; }
+
+        public bool TryResolveFrontRoute(HexCoordinates start, float damagePerSecond, float moveSpeed,
+            int topologyVersion, out HexCastleAssaultRoutePlan plan)
+        {
+            plan = null;
+            if (!cells.ContainsKey(start) || palaceFootprint.Contains(start) ||
+                !HexAttackSlotAllocator.Finite(damagePerSecond) || !HexAttackSlotAllocator.Finite(moveSpeed)) return false;
+            FrontRouteBuildCount++;
+            var path = new List<HexCoordinates> { start };
+            var current = start;
+            var axis = start.ToWorld(1f);
+            var hasObstacle = false;
+            var obstacle = default(HexCoordinates);
+            var approach = start;
+            var cost = 0f;
+            while (!palaceApproaches.Contains(current))
+            {
+                var found = false;
+                var next = default(HexCoordinates);
+                var bestDeviation = float.PositiveInfinity;
+                for (var direction = 0; direction < 6; direction++)
+                {
+                    var candidate = current.Neighbor(direction);
+                    if (candidate.DistanceFromOrigin >= current.DistanceFromOrigin ||
+                        !cells.TryGetValue(candidate, out var cell) || cell == null || palaceFootprint.Contains(candidate)) continue;
+                    var point = candidate.ToWorld(1f);
+                    var deviation = Mathf.Abs(axis.x * point.z - axis.z * point.x);
+                    if (found && (deviation > bestDeviation + .0001f ||
+                        Mathf.Abs(deviation - bestDeviation) <= .0001f && candidate.CompareTo(next) >= 0)) continue;
+                    next = candidate; bestDeviation = deviation; found = true;
+                }
+                if (!found) return false;
+                var target = cells[next];
+                if (!target.CanTraverse(HexCastleTraversalFaction.Assault) && !target.IsDamageable) return false;
+                cost += Vector3.Distance(cells[current].transform.position, target.transform.position) / Mathf.Max(.1f, moveSpeed);
+                if (target.IsBlocked)
+                {
+                    if (!hasObstacle) { obstacle = next; approach = current; hasObstacle = true; }
+                    cost += target.CurrentHealth / Mathf.Max(.1f, damagePerSecond);
+                }
+                path.Add(next); current = next;
+            }
+            var sector = ResolveSector(start);
+            var anchor = hasObstacle ? obstacle : current;
+            plan = new HexCastleAssaultRoutePlan(path, cost, current, obstacle, approach, hasObstacle,
+                ResolveRouteId(sector, anchor), sector, topologyVersion);
+            return true; // 소환 측 진입선을 정하며 미래 비용으로 다른 전면을 고르지 않는다.
+        }
+
         public bool TryResolveRoute(
             HexCoordinates start,
             HexCastleAssaultRoutePolicy policy,
@@ -221,7 +291,9 @@ namespace ProjectMT.Contents.CastleRaidHex
             out HexCastleAssaultRoutePlan plan)
         {
             plan = null;
-            if (!cells.ContainsKey(start) || palaceFootprint.Contains(start))
+            LastQueryReused = false;
+            if (!HexAttackSlotAllocator.Finite(damagePerSecond) || !HexAttackSlotAllocator.Finite(moveSpeed) ||
+                !cells.ContainsKey(start) || palaceFootprint.Contains(start))
             {
                 return false;
             }
@@ -234,17 +306,30 @@ namespace ProjectMT.Contents.CastleRaidHex
                 damageBand,
                 speedBand,
                 topologyVersion);
-            if (!fields.TryGetValue(key, out var field))
+            var existing = fields.TryGetValue(key, out var field);
+            if (!existing || field.CostsDirty)
             {
                 field = BuildReverseField(
                     policy,
                     key.ExpectedDefenseLayer,
                     damageBand * 10f,
                     speedBand / 4f);
-                fields.Add(key, field);
+                if (!existing && fields.Count >= Math.Max(1, MaxCachedFields))
+                {
+                    var oldest = fields.OrderBy(p => p.Value.LastUse).First().Key;
+                    fields.Remove(oldest);
+                }
+                fields[key] = field;
+                FieldBuildCount++;
+            }
+            else
+            {
+                LastQueryReused = true;
+                FieldReuseCount++;
             }
 
-            if (!field.ContainsKey(start))
+            field.LastUse = ++useSequence;
+            if (!field.Costs.ContainsKey(start))
             {
                 return false;
             }
@@ -282,14 +367,15 @@ namespace ProjectMT.Contents.CastleRaidHex
             var routeId = ResolveRouteId(sector, routeAnchor);
             plan = new HexCastleAssaultRoutePlan(
                 path,
-                field[start],
+                field.Costs[start],
                 path[path.Count - 1],
                 obstacle,
                 obstacleApproach,
                 hasObstacle,
                 routeId,
                 sector,
-                topologyVersion);
+                topologyVersion,
+                path.Skip(1).Select(c => field.Entry[c]).ToArray());
             return true;
         }
 
@@ -328,43 +414,38 @@ namespace ProjectMT.Contents.CastleRaidHex
         }
 
         public bool TryResolveOpenApproachRoute(
-            HexCoordinates start,
-            HexCoordinates target,
-            int maximumRangeCells,
-            IReadOnlyCollection<HexCoordinates> excludedApproaches,
-            Predicate<HexCoordinates> approachPredicate,
-            out IReadOnlyList<HexCoordinates> route,
-            out HexCoordinates approach)
+            HexCoordinates start, HexCoordinates target, int maximumRangeCells,
+            IReadOnlyCollection<HexCoordinates> excludedApproaches, Predicate<HexCoordinates> approachPredicate,
+            out IReadOnlyList<HexCoordinates> route, out HexCoordinates approach)
         {
-            route = Array.Empty<HexCoordinates>();
-            approach = start;
-            var maximumRange = Mathf.Max(1, maximumRangeCells);
-            var candidates = cells.Keys
-                .Where(value => value.DistanceTo(target) <= maximumRange &&
-                                !palaceFootprint.Contains(value) &&
-                                (excludedApproaches == null || !excludedApproaches.Contains(value)) &&
-                                (approachPredicate == null || approachPredicate(value)) &&
-                                cells[value] != null && cells[value].CanTraverse(HexCastleTraversalFaction.Assault))
-                .OrderBy(value => start.DistanceTo(value))
-                .ThenBy(value => value)
-                .ToArray();
-            for (var index = 0; index < candidates.Length; index++)
+            route = Array.Empty<HexCoordinates>(); approach = start;
+            if (!cells.TryGetValue(start, out var startCell) || startCell == null ||
+                palaceFootprint.Contains(start) || !startCell.CanTraverse(HexCastleTraversalFaction.Assault)) return false;
+            var queue = new Queue<HexCoordinates>();
+            var previous = new Dictionary<HexCoordinates, HexCoordinates>();
+            var visited = new HashSet<HexCoordinates> { start };
+            queue.Enqueue(start);
+            while (queue.Count > 0)
             {
-                var candidateRoute = new HexRoutePlanner().FindTraversalRoute(
-                    cells,
-                    start,
-                    candidates[index],
-                    HexCastleTraversalFaction.Assault);
-                if (candidateRoute.Count == 0)
+                var current = queue.Dequeue();
+                if (current.DistanceTo(target) <= Math.Max(1, maximumRangeCells) &&
+                    (excludedApproaches == null || !excludedApproaches.Contains(current)) &&
+                    (approachPredicate == null || approachPredicate(current)))
                 {
-                    continue;
+                    var path = new List<HexCoordinates> { current };
+                    var p = current;
+                    while (p != start) { p = previous[p]; path.Add(p); }
+                    path.Reverse(); route = path; approach = current; return true;
                 }
-
-                route = candidateRoute;
-                approach = candidates[index];
-                return true;
+                for (var d = 0; d < 6; d++)
+                {
+                    var next = current.Neighbor(d);
+                    if (visited.Contains(next) || palaceFootprint.Contains(next) ||
+                        !cells.TryGetValue(next, out var nextCell) || nextCell == null ||
+                        !HexRoutePlanner.CanTraverseStep(cells[current], nextCell, d, HexCastleTraversalFaction.Assault)) continue;
+                    visited.Add(next); previous[next] = current; queue.Enqueue(next);
+                }
             }
-
             return false;
         }
 
@@ -399,119 +480,57 @@ namespace ProjectMT.Contents.CastleRaidHex
             return true;
         }
 
-        private Dictionary<HexCoordinates, float> BuildReverseField(
-            HexCastleAssaultRoutePolicy policy,
-            int expectedDefenseLayer,
-            float damagePerSecond,
-            float moveSpeed)
+        private CostFieldSnapshot BuildReverseField(
+            HexCastleAssaultRoutePolicy policy, int expectedDefenseLayer, float damagePerSecond, float moveSpeed)
         {
-            var result = new Dictionary<HexCoordinates, float>();
-            var heap = new MinimumHeap();
-            foreach (var goal in palaceApproaches)
+            var result = new CostFieldSnapshot();
+            // HP 구간 변경 때만 무효화하고 실제 질의된 공유 필드만 재생성한다.
+            foreach (var pair in cells)
             {
-                if (!CanUseCell(goal, expectedDefenseLayer))
-                {
-                    continue;
-                }
-
-                result[goal] = 0f;
+                var entry = ResolveEntryCost(pair.Key, policy, expectedDefenseLayer, damagePerSecond, moveSpeed);
+                if (!float.IsPositiveInfinity(entry)) result.Entry.Add(pair.Key, entry);
+            }
+            var heap = new MinimumHeap();
+            foreach (var goal in palaceApproaches.OrderBy(c => c))
+            {
+                if (!result.Entry.ContainsKey(goal)) continue;
+                result.Costs[goal] = 0f;
                 heap.Push(new QueueNode(goal, 0f));
             }
-
             while (heap.Count > 0)
             {
                 var current = heap.Pop();
-                if (!result.TryGetValue(current.Coordinates, out var currentCost) ||
-                    current.Cost > currentCost + 0.0001f)
-                {
-                    continue;
-                }
-
-                var entryCost = ResolveEntryCost(
-                    current.Coordinates,
-                    policy,
-                    expectedDefenseLayer,
-                    damagePerSecond,
-                    moveSpeed);
-                if (float.IsPositiveInfinity(entryCost))
-                {
-                    continue;
-                }
-
-                for (var direction = 0; direction < HexCoordinates.Directions.Length; direction++)
+                if (!result.Costs.TryGetValue(current.Coordinates, out var currentCost) || current.Cost > currentCost + 0.0001f) continue;
+                var entryCost = result.Entry[current.Coordinates];
+                for (var direction = 0; direction < 6; direction++)
                 {
                     var predecessor = current.Coordinates.Neighbor(direction);
-                    if (!CanUseCell(predecessor, expectedDefenseLayer) || palaceFootprint.Contains(predecessor))
-                    {
-                        continue;
-                    }
-
+                    if (!result.Entry.ContainsKey(predecessor)) continue;
                     var candidate = currentCost + entryCost;
-                    if (result.TryGetValue(predecessor, out var known) && candidate >= known - 0.0001f)
-                    {
-                        continue;
-                    }
-
-                    result[predecessor] = candidate;
+                    if (result.Costs.TryGetValue(predecessor, out var known) && candidate >= known - 0.0001f) continue;
+                    result.Costs[predecessor] = candidate;
+                    result.Next[predecessor] = current.Coordinates;
                     heap.Push(new QueueNode(predecessor, candidate));
                 }
             }
-
             return result;
         }
 
         private IReadOnlyList<HexCoordinates> ReconstructPath(
-            HexCoordinates start,
-            IReadOnlyDictionary<HexCoordinates, float> field,
-            HexCastleAssaultRoutePolicy policy,
-            int expectedDefenseLayer,
-            float damagePerSecond,
-            float moveSpeed)
+            HexCoordinates start, CostFieldSnapshot field, HexCastleAssaultRoutePolicy policy,
+            int expectedDefenseLayer, float damagePerSecond, float moveSpeed)
         {
             var result = new List<HexCoordinates> { start };
-            var visited = new HashSet<HexCoordinates> { start };
             var current = start;
             var guard = cells.Count + 1;
             while (!palaceApproaches.Contains(current) && guard-- > 0)
             {
-                var found = false;
-                var best = default(HexCoordinates);
-                var bestCost = float.PositiveInfinity;
-                for (var direction = 0; direction < HexCoordinates.Directions.Length; direction++)
-                {
-                    var neighbor = current.Neighbor(direction);
-                    if (!field.TryGetValue(neighbor, out var remaining) ||
-                        !CanUseCell(neighbor, expectedDefenseLayer) || palaceFootprint.Contains(neighbor))
-                    {
-                        continue;
-                    }
-
-                    var entry = ResolveEntryCost(
-                        neighbor,
-                        policy,
-                        expectedDefenseLayer,
-                        damagePerSecond,
-                        moveSpeed);
-                    var candidate = entry + remaining;
-                    if (candidate >= bestCost - 0.0001f)
-                    {
-                        continue;
-                    }
-
-                    best = neighbor;
-                    bestCost = candidate;
-                    found = true;
-                }
-
-                if (!found || !visited.Add(best))
-                {
-                    return Array.Empty<HexCoordinates>();
-                }
-
-                current = best;
+                if (!field.Next.TryGetValue(current, out var next) ||
+                    !field.Costs.TryGetValue(next, out var remaining) ||
+                    remaining >= field.Costs[current]) return Array.Empty<HexCoordinates>();
+                current = next;
                 result.Add(current);
             }
-
             return palaceApproaches.Contains(current) ? result : Array.Empty<HexCoordinates>();
         }
 

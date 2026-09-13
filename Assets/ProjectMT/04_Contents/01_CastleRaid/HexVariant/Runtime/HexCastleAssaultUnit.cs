@@ -66,6 +66,43 @@ namespace ProjectMT.Contents.CastleRaidHex
         private readonly Dictionary<int, int> specialistTargetCounts = new Dictionary<int, int>();
         private readonly HexMonsterPassiveRuntime passiveRuntime = new HexMonsterPassiveRuntime();
 
+
+        [SerializeField, Range(0.05f, 0.9f)] private float occupancyRadiusRatio = 0.30f;
+        private HexCastleAssaultDecision activePlan;
+        private int finalApproachIndex;
+        private bool motionActive, motionFinal, finishSafeSegmentOnly;
+        private HexCoordinates motionFrom, motionTo;
+        private Vector3 motionStart, motionEnd;
+        private float retryNotBefore, avoidSlotUntil;
+        private HexAttackSlotKey avoidSlot;
+        private bool hasAvoidSlot;
+        private int plannedDamageBand, plannedSpeedBand;
+        public int RuntimeGeneration { get; private set; }
+        public int PlanGeneration { get; private set; }
+        public HexAssaultExecutionState ExecutionState { get; private set; } = HexAssaultExecutionState.Inactive;
+        public HexAssaultFailureReason LastDecisionReason { get; private set; }
+        public int ConsecutiveDecisionFailures { get; private set; }
+        public bool RecoveryRequested { get; private set; }
+        public float LastActualProgressTime { get; private set; }
+        public float LastDecisionTime { get; private set; }
+        public float RetryNotBefore => retryNotBefore;
+        public float SlotBodyRadius => Mathf.Max(0.05f, occupancyRadiusRatio) * Mathf.Max(0.1f, cellSize) * 0.8660254038f;
+        public float GroundWorldY => worldOrigin.y + groundOffset;
+        public float EffectiveMoveSpeed => Mathf.Max(0.1f, moveSpeed * CurrentMoveSpeedMultiplier);
+        public HexSlotLease CurrentSlotLease => activePlan.SlotLease;
+        public HexCastleAssaultDecision ActivePlan => activePlan;
+        public bool IsInSafeMotion => motionActive && CanDynamicStep(motionFrom, motionTo);
+        public Vector3 MotionStart => motionStart;
+        public Vector3 MotionEnd => motionEnd;
+        public HexCoordinates MotionDestinationCell => motionTo;
+        public void ConfigureOccupancyRadius(float ratio)
+        {
+            if (!HexAttackSlotAllocator.Finite(ratio) || ratio < 0.05f || ratio > 0.9f)
+                throw new ArgumentOutOfRangeException(nameof(ratio));
+            if (activePlan.SlotLease.IsValid) throw new InvalidOperationException("Release the current spatial lease before resizing a unit.");
+            occupancyRadiusRatio = ratio;
+        }
+
         public bool ReachedPalace { get; private set; }
         public HexCoordinates CurrentCoordinates { get; private set; }
         public int DestroyedTargets { get; private set; }
@@ -102,6 +139,7 @@ namespace ProjectMT.Contents.CastleRaidHex
                 Mathf.CeilToInt(aiProfile.SupportRange / Mathf.Max(0.1f, cellSize * 1.7320508f)));
         public int ExpectedDefenseLayer { get; private set; }
         public int RouteId { get; private set; }
+        internal int StableSpawnOrder => assaultWorld != null ? assaultWorld.ResolveSpawnOrder(this) : 0;
         public int RouteSector { get; private set; }
         public HexCastleAssaultAIProfile AIProfile => aiProfile;
         public HexCastleAssaultTarget CurrentTarget => currentTarget;
@@ -110,18 +148,81 @@ namespace ProjectMT.Contents.CastleRaidHex
         public HexCastleAssaultIntentKind CommittedIntent => committedIntent;
         public HexCastleAssaultSupportAction CurrentSupportAction => currentSupportAction;
         public bool HasSelectedInitialWall { get; private set; }
+        public bool RouteCostReviewRequested { get; private set; } = true;
+        private float routeReviewAt = float.PositiveInfinity;
+        internal void DeferRouteCostReview(float delay) => routeReviewAt = Mathf.Min(routeReviewAt, Time.time + delay);
+        public float LastTargetSwitchTime { get; private set; }
+        public int AdvanceMoveMs { get; private set; }
+        public int AdvanceDestroyMs { get; private set; }
+        public int AdvanceContinuationMs { get; private set; }
+        public int AdvanceAlternativeMs { get; private set; }
+        public HexCoordinates? AdvanceAlternativeTarget { get; private set; }
+        internal void RecordAdvanceCost(int move, int destroy, int continuation, HexCoordinates? alternative, int alternativeMs)
+        {
+            AdvanceMoveMs = move; AdvanceDestroyMs = destroy; AdvanceContinuationMs = continuation;
+            AdvanceAlternativeTarget = alternative; AdvanceAlternativeMs = alternativeMs;
+        }
+        internal void CompleteRouteCostReview() => RouteCostReviewRequested = false;
+
+        internal float RemainingMovementSeconds()
+        {
+            var position = transform.position; var length = 0f;
+            for (var i = pathIndex + 1; i < movementPath.Count - 1; i++)
+            {
+                var next = worldOrigin + movementPath[i].ToWorld(cellSize); next.y = position.y;
+                length += Vector3.Distance(position, next); position = next;
+            }
+            for (var i = finalApproachIndex; i < activePlan.FinalApproach.Count; i++)
+            {
+                var next = activePlan.FinalApproach[i]; next.y = position.y;
+                length += Vector3.Distance(position, next); position = next;
+            }
+            return length / EffectiveMoveSpeed;
+        }
+        public bool HasBreachCostEvaluation { get; private set; }
+        public HexCoordinates LastBreachTargetCoordinates { get; private set; }
+        public float LastBreachMovementSeconds { get; private set; }
+        public float LastBreachDestructionSeconds { get; private set; }
+        public float LastBreachTotalSeconds { get; private set; }
+        public float LastBreachExpectedDamagePerSecond { get; private set; }
+        public bool HasAlternativeBreachCost { get; private set; }
+        public HexCoordinates AlternativeBreachTargetCoordinates { get; private set; }
+        public float AlternativeBreachMovementSeconds { get; private set; }
+        public float AlternativeBreachDestructionSeconds { get; private set; }
+        public float AlternativeBreachTotalSeconds { get; private set; }
         public HexCastleAssaultTarget RecentThreat => recentThreatRemaining > 0f && recentThreat.IsValid
             ? recentThreat
             : default;
         public bool NeedsStrategicDecision => dynamicRuntime && active && IsAlive && !attackActionRunning &&
-                                              (strategicDecisionRequested || !currentTarget.IsValid ||
-                                               Time.time >= nextAwarenessAt ||
-                                               assaultWorld != null &&
-                                               decisionTopologyVersion != assaultWorld.TopologyVersion);
+            Time.time >= retryNotBefore && !IsInSafeMotion &&
+            (strategicDecisionRequested || !currentTarget.IsValid || Time.time >= nextAwarenessAt || Time.time >= routeReviewAt ||
+             plannedDamageBand != DamageBand() || plannedSpeedBand != SpeedBand());
 
         public event Action<HexCastleAssaultUnit, DamageReport> Damaged;
         public event Action<HexCastleAssaultUnit> Died;
         public event Action<HexCastleAssaultUnit, HexCoordinates> EnteredCell;
+
+        internal void RecordBreachCostEvaluation(
+            HexCoordinates selectedTarget,
+            float movementSeconds,
+            float destructionSeconds,
+            float expectedDamagePerSecond,
+            HexCoordinates? alternativeTarget,
+            float alternativeMovementSeconds,
+            float alternativeDestructionSeconds)
+        {
+            HasBreachCostEvaluation = true;
+            LastBreachTargetCoordinates = selectedTarget;
+            LastBreachMovementSeconds = Mathf.Max(0f, movementSeconds);
+            LastBreachDestructionSeconds = Mathf.Max(0f, destructionSeconds);
+            LastBreachTotalSeconds = LastBreachMovementSeconds + LastBreachDestructionSeconds;
+            LastBreachExpectedDamagePerSecond = Mathf.Max(0f, expectedDamagePerSecond);
+            HasAlternativeBreachCost = alternativeTarget.HasValue;
+            AlternativeBreachTargetCoordinates = alternativeTarget.GetValueOrDefault();
+            AlternativeBreachMovementSeconds = alternativeTarget.HasValue ? Mathf.Max(0f, alternativeMovementSeconds) : 0f;
+            AlternativeBreachDestructionSeconds = alternativeTarget.HasValue ? Mathf.Max(0f, alternativeDestructionSeconds) : 0f;
+            AlternativeBreachTotalSeconds = AlternativeBreachMovementSeconds + AlternativeBreachDestructionSeconds;
+        }
 
         public void ConfigureForRoute(
             HexRouteResult route,
@@ -254,64 +355,106 @@ namespace ProjectMT.Contents.CastleRaidHex
 
         public void RefreshStrategicDecision()
         {
-            if (!NeedsStrategicDecision || assaultWorld == null)
-            {
-                return;
-            }
-
+            if (!NeedsStrategicDecision || assaultWorld == null) return;
+            if (Time.time >= routeReviewAt) { RouteCostReviewRequested = true; routeReviewAt = float.PositiveInfinity; }
+            if (plannedDamageBand != DamageBand() || plannedSpeedBand != SpeedBand()) RouteCostReviewRequested = true;
             strategicDecisionRequested = false;
+            LastDecisionTime = Time.time;
             nextAwarenessAt = Time.time + TargetAwarenessInterval + ResolveDecisionSpread();
-            if (!assaultWorld.TryResolveDecision(this, out var decision))
+            var result = assaultWorld.ResolveDecision(this);
+            LastDecisionReason = result.Reason;
+            if (result.Status == HexAssaultDecisionStatus.Accepted)
             {
-                if (!currentTarget.IsValid)
-                {
-                    movementPath = new[] { CurrentCoordinates };
-                    pathIndex = 0;
-                    animationDriver?.PlayIdle();
-                }
+                ConsecutiveDecisionFailures = 0; retryNotBefore = 0f; RecoveryRequested = false;
+                ApplyPlan(result.Plan);
                 return;
             }
-
-            var startsNewCommitment = IsCommitmentIntent(decision.Intent) &&
-                                      (!committedTarget.IsValid ||
-                                       committedTarget.InstanceId != decision.Target.InstanceId ||
-                                       committedIntent != decision.Intent);
-            currentTarget = decision.Target;
-            currentIntent = decision.Intent;
-            currentSupportAction = decision.SupportAction;
-            if (startsNewCommitment)
+            ConsecutiveDecisionFailures++;
+            retryNotBefore = result.RetryAt;
+            if (result.Plan.IsValid) ApplyPlan(result.Plan);
+            else if (CanFinishCurrentEdge())
             {
-                committedTarget = decision.Target;
-                committedIntent = decision.Intent;
-                if (decision.Intent == HexCastleAssaultIntentKind.InitialBreach)
-                {
+                finishSafeSegmentOnly = true;
+                assaultWorld.Record(HexAssaultTraceKind.MotionSegmentPreserved, this, currentTarget.InstanceId, activePlan.SlotLease, result.Reason);
+            }
+            else
+            {
+                // Do not move the Transform back to its last logical cell.
+                motionActive = false;
+                movementPath = new[] { CurrentCoordinates }; pathIndex = 0;
+                ExecutionState = RecoveryRequested ? HexAssaultExecutionState.Recovering : HexAssaultExecutionState.Holding;
+                animationDriver?.PlayIdle();
+            }
+        }
+
+        private void ApplyPlan(HexCastleAssaultDecision decision)
+        {
+            var identical = IsSameExecutionPlan(activePlan, decision);
+            decisionTopologyVersion = decision.TopologyVersion;
+            plannedDamageBand = DamageBand(); plannedSpeedBand = SpeedBand();
+            if (identical) return; // Preserve both pathIndex and the in-cell alignment progress.
+            var startsCommitment = IsCommitmentIntent(decision.Intent) &&
+                (!committedTarget.IsValid || committedTarget.InstanceId != decision.Target.InstanceId || committedIntent != decision.Intent);
+            if (currentTarget.InstanceId != decision.Target.InstanceId) LastTargetSwitchTime = Time.time;
+            currentTarget = decision.Target; currentIntent = decision.Intent; currentSupportAction = decision.SupportAction;
+            if (startsCommitment)
+            {
+                committedTarget = decision.Target; committedIntent = decision.Intent;
+                if (decision.Intent == HexCastleAssaultIntentKind.InitialBreach || decision.Intent == HexCastleAssaultIntentKind.LocalFallback)
                     HasSelectedInitialWall = true;
-                }
                 else if (decision.Intent == HexCastleAssaultIntentKind.Specialist)
                 {
                     specialistTargetCounts.TryGetValue(ExpectedDefenseLayer, out var count);
                     specialistTargetCounts[ExpectedDefenseLayer] = count + 1;
                 }
             }
-            movementPath = decision.MovementPath;
-            pathIndex = 0;
-            RouteId = decision.RouteId;
-            RouteSector = decision.SectorId;
-            decisionTopologyVersion = decision.TopologyVersion;
-            if (movementPath.Count > 0 && movementPath[0] != CurrentCoordinates)
-            {
-                movementPath = new[] { CurrentCoordinates }.Concat(movementPath).ToArray();
-            }
+            activePlan = decision;
+            movementPath = decision.MovementPath; pathIndex = 0; finalApproachIndex = 0;
+            finishSafeSegmentOnly = false; motionActive = false;
+            RouteId = decision.RouteId; RouteSector = decision.SectorId; PlanGeneration++;
+            ExecutionState = HexAssaultExecutionState.Traversing;
+        }
+
+        private static bool IsSameExecutionPlan(HexCastleAssaultDecision current, HexCastleAssaultDecision next)
+        {
+            return current.SlotLease.IsValid && current.SlotLease == next.SlotLease &&
+                current.Target.InstanceId == next.Target.InstanceId && current.TargetCell == next.TargetCell &&
+                current.Approach == next.Approach && current.RouteId == next.RouteId && current.SectorId == next.SectorId &&
+                current.Intent == next.Intent && current.SupportAction == next.SupportAction && current.PlanKind == next.PlanKind &&
+                SameCoordinates(current.MovementPath, next.MovementPath) && SamePositions(current.FinalApproach, next.FinalApproach);
+        }
+
+        private static bool SameCoordinates(IReadOnlyList<HexCoordinates> left, IReadOnlyList<HexCoordinates> right)
+        {
+            if (ReferenceEquals(left, right)) return true;
+            if (left == null || right == null || left.Count != right.Count) return false;
+            for (var i = 0; i < left.Count; i++) if (left[i] != right[i]) return false;
+            return true;
+        }
+
+        private static bool SamePositions(IReadOnlyList<Vector3> left, IReadOnlyList<Vector3> right)
+        {
+            if (ReferenceEquals(left, right)) return true;
+            if (left == null || right == null || left.Count != right.Count) return false;
+            for (var i = 0; i < left.Count; i++)
+                if ((left[i] - right[i]).sqrMagnitude > 0.00000001f) return false;
+            return true;
         }
 
         public void RequestStrategicDecision(bool immediate)
         {
             strategicDecisionRequested = true;
-            if (immediate)
-            {
-                nextAwarenessAt = 0f;
-            }
+            if (immediate) { nextAwarenessAt = 0f; retryNotBefore = 0f; }
         }
+
+#if UNITY_EDITOR
+        public void EditorOverrideAIProfile(HexCastleAssaultAIProfile profile)
+        {
+            if (profile == null) return;
+            aiProfile = profile;
+            RequestStrategicDecision(true);
+        }
+#endif
 
         public bool HasEvaluatedOpportunity(int defenseLayer)
         {
@@ -482,6 +625,7 @@ namespace ProjectMT.Contents.CastleRaidHex
         public void ShutdownRuntime()
         {
             passiveRuntime.Shutdown();
+            motionActive = false; activePlan = default; ExecutionState = HexAssaultExecutionState.Inactive;
             HideHealthBar();
             assaultWorld?.UnregisterUnit(this);
             assaultWorld = null;
@@ -499,6 +643,13 @@ namespace ProjectMT.Contents.CastleRaidHex
             evaluatedOpportunityLayers.Clear();
             specialistTargetCounts.Clear();
             HasSelectedInitialWall = false;
+            RouteCostReviewRequested = true;
+            LastTargetSwitchTime = float.NegativeInfinity;
+            routeReviewAt = float.PositiveInfinity;
+            AdvanceMoveMs = AdvanceDestroyMs = AdvanceContinuationMs = AdvanceAlternativeMs = 0;
+            AdvanceAlternativeTarget = null;
+            HasBreachCostEvaluation = false;
+            HasAlternativeBreachCost = false;
             dynamicRuntime = false;
             strategicDecisionRequested = false;
             active = false;
@@ -506,6 +657,11 @@ namespace ProjectMT.Contents.CastleRaidHex
             trapSlowRemaining = 0f;
             trapMoveSpeedMultiplier = 1f;
             EnteredCell = null;
+        }
+
+        private void OnDisable()
+        {
+            if (dynamicRuntime) ShutdownRuntime();
         }
 
         private void HideHealthBar()
@@ -564,6 +720,17 @@ namespace ProjectMT.Contents.CastleRaidHex
             BattleUnitSnapshot unit,
             float targetAttackRange)
         {
+            RuntimeGeneration++;
+            PlanGeneration = 0;
+            HasBreachCostEvaluation = false;
+            HasAlternativeBreachCost = false;
+            activePlan = default; finalApproachIndex = 0;
+            motionActive = motionFinal = finishSafeSegmentOnly = false;
+            retryNotBefore = avoidSlotUntil = 0f; hasAvoidSlot = false;
+            ConsecutiveDecisionFailures = 0; RecoveryRequested = false;
+            LastActualProgressTime = Time.time; LastDecisionTime = Time.time;
+            LastDecisionReason = HexAssaultFailureReason.None;
+            ExecutionState = HexAssaultExecutionState.AwaitInitialPlan;
             moveSpeed = Mathf.Max(0.1f, targetMoveSpeed);
             attackDamage = Mathf.Max(1f, targetAttackDamage);
             attackInterval = Mathf.Max(0.05f, targetAttackInterval);
@@ -637,61 +804,229 @@ namespace ProjectMT.Contents.CastleRaidHex
         {
             if (attackActionRunning)
             {
-                TickAttackAction(deltaTime);
-                return;
+                ExecutionState = HexAssaultExecutionState.Attacking;
+                TickAttackAction(deltaTime); return;
             }
-
+            if (motionActive)
+            {
+                if (trapMovementLockRemaining > 0f) { animationDriver?.PlayIdle(); return; }
+                if (!CanDynamicStep(motionFrom, motionTo))
+                {
+                    motionActive = false;
+                    MarkNoProgress(HexAssaultFailureReason.NoReachableApproach);
+                    return;
+                }
+                if (motionFinal && !assaultWorld.ApproachPlanner.SegmentClear(this, transform.position, motionEnd))
+                {
+                    motionActive = false;
+                    if (TryRefreshFinalApproach()) { BeginFinalApproach(deltaTime); return; }
+                    MarkNoProgress(HexAssaultFailureReason.SlotApproachBlocked);
+                    return;
+                }
+                AdvanceMotion(deltaTime); return;
+            }
             if (movementPath != null && pathIndex < movementPath.Count - 1)
             {
-                var nextCoordinates = movementPath[pathIndex + 1];
-                if (!CanAssaultTraverse(nextCoordinates))
-                {
-                    RequestStrategicDecision(true);
-                    animationDriver?.PlayIdle();
-                    return;
-                }
-
-                var destination = ResolvePosition(nextCoordinates);
-                MoveTowards(destination, deltaTime);
-                if (Vector3.SqrMagnitude(transform.position - destination) > 0.015f)
-                {
-                    return;
-                }
-
-                pathIndex++;
-                CurrentCoordinates = nextCoordinates;
-                EnteredCell?.Invoke(this, nextCoordinates);
-                UpdateDefenseProgress(nextCoordinates);
-                return;
+                if (trapMovementLockRemaining > 0f) { animationDriver?.PlayIdle(); return; }
+                var next = movementPath[pathIndex + 1];
+                if (!CanDynamicStep(CurrentCoordinates, next))
+                { MarkNoProgress(HexAssaultFailureReason.NoReachableApproach); return; }
+                if (!finishSafeSegmentOnly && activePlan.FinalApproach != null && activePlan.FinalApproach.Count > 0 && pathIndex == movementPath.Count - 2)
+                { BeginFinalApproach(deltaTime); return; }
+                BeginMotion(next, ResolvePosition(next), false);
+                AdvanceMotion(deltaTime); return;
             }
-
+            if (activePlan.SlotLease.IsValid && finalApproachIndex < activePlan.FinalApproach.Count)
+            {
+                if (trapMovementLockRemaining > 0f) { animationDriver?.PlayIdle(); return; }
+                BeginFinalApproach(deltaTime); return;
+            }
+            if (activePlan.PlanKind == HexAssaultPlanKind.Hold)
+            {
+                ExecutionState = HexAssaultExecutionState.Holding;
+                strategicDecisionRequested = true; // retryNotBefore is still authoritative.
+                CheckNoProgress(); animationDriver?.PlayIdle(); return;
+            }
             if (!currentTarget.IsValid)
             {
-                RequestStrategicDecision(true);
-                animationDriver?.PlayIdle();
-                return;
+                ExecutionState = HexAssaultExecutionState.Holding;
+                strategicDecisionRequested = true;
+                CheckNoProgress(); animationDriver?.PlayIdle(); return;
             }
-
             if (currentTarget.Kind == HexCastleAssaultTargetKind.Ally)
-            {
-                TickSupportTarget();
-                return;
-            }
-
+            { TickSupportTarget(); return; }
             if (!CanAttackTarget(currentTarget))
             {
-                RequestStrategicDecision(true);
-                animationDriver?.PlayIdle();
+                strategicDecisionRequested = true;
+                CheckNoProgress(); animationDriver?.PlayIdle(); return;
+            }
+            ExecutionState = HexAssaultExecutionState.Attacking;
+            animationDriver?.PlayIdle();
+            FaceTowards(ResolveTargetPosition(currentTarget), deltaTime);
+            if (Time.time >= nextAttackTime) StartDynamicAttack(currentTarget);
+        }
+
+        private void BeginMotion(HexCoordinates destination, Vector3 position, bool final)
+        {
+            motionActive = true; motionFinal = final;
+            motionFrom = CurrentCoordinates; motionTo = destination;
+            motionStart = transform.position; motionEnd = position; motionEnd.y = GroundWorldY;
+            ExecutionState = final ? HexAssaultExecutionState.Aligning : HexAssaultExecutionState.Traversing;
+        }
+
+        private void AdvanceMotion(float deltaTime)
+        {
+            var before = transform.position;
+            MoveTowards(motionEnd, deltaTime);
+            if (HexAttackSlotAllocator.SqrPlanar(transform.position - before) > 0.0000001f)
+                LastActualProgressTime = Time.time;
+            if (HexAttackSlotAllocator.SqrPlanar(transform.position - motionEnd) > 0.0025f) return;
+            motionActive = false;
+            if (motionFinal)
+            {
+                finalApproachIndex++;
+                if (finalApproachIndex < activePlan.FinalApproach.Count) return;
+                CompleteCellEntry(motionTo);
+                pathIndex = Math.Max(0, movementPath.Count - 1);
+                if (assaultWorld.SlotAllocator.Arrive(this, activePlan.SlotLease))
+                {
+                    LastActualProgressTime = Time.time;
+                    assaultWorld.Record(HexAssaultTraceKind.SlotArrived, this, currentTarget.InstanceId, activePlan.SlotLease);
+                }
+                else { strategicDecisionRequested = true; retryNotBefore = 0f; }
+            }
+            else
+            {
+                pathIndex++; CompleteCellEntry(motionTo);
+            }
+            if (finishSafeSegmentOnly)
+            {
+                movementPath = new[] { CurrentCoordinates }; pathIndex = 0;
+                activePlan = default; finishSafeSegmentOnly = false; strategicDecisionRequested = true;
+            }
+        }
+
+        private void CompleteCellEntry(HexCoordinates cell)
+        {
+            if (CurrentCoordinates == cell) return;
+            CurrentCoordinates = cell; EnteredCell?.Invoke(this, cell); UpdateDefenseProgress(cell);
+        }
+
+        private void BeginFinalApproach(float deltaTime)
+        {
+            if (finalApproachIndex >= activePlan.FinalApproach.Count) return;
+            var destination = activePlan.FinalApproach[finalApproachIndex];
+            if (!assaultWorld.ApproachPlanner.SegmentClear(this, transform.position, destination))
+            {
+                if (!TryRefreshFinalApproach()) { MarkNoProgress(HexAssaultFailureReason.SlotApproachBlocked); return; }
+                destination = activePlan.FinalApproach[finalApproachIndex];
+                if (!assaultWorld.ApproachPlanner.SegmentClear(this, transform.position, destination))
+                { MarkNoProgress(HexAssaultFailureReason.SlotApproachBlocked); return; }
+            }
+            BeginMotion(activePlan.Approach, destination, true); AdvanceMotion(deltaTime);
+        }
+
+        private bool TryRefreshFinalApproach()
+        {
+            if (!activePlan.SlotLease.IsValid || !assaultWorld.SlotAllocator.Owns(this, activePlan.SlotLease) ||
+                activePlan.PlanKind != HexAssaultPlanKind.Hold && !currentTarget.IsValid) return false;
+            var destination = assaultWorld.SlotAllocator.Position(activePlan.SlotLease.Key);
+            destination.y = GroundWorldY;
+            if (!assaultWorld.ApproachPlanner.TryFinalPath(this, transform.position, destination, activePlan.Approach,
+                    out var refreshed, out _)) return false;
+            activePlan = new HexCastleAssaultDecision(activePlan.Target, movementPath, activePlan.Approach,
+                activePlan.RouteId, activePlan.SectorId, activePlan.TopologyVersion, activePlan.Intent,
+                activePlan.SupportAction, activePlan.SlotLease, refreshed, activePlan.PlanKind);
+            finalApproachIndex = 0; PlanGeneration++;
+            assaultWorld.Record(HexAssaultTraceKind.PlanCommitted, this, currentTarget.InstanceId,
+                activePlan.SlotLease, HexAssaultFailureReason.SlotApproachBlocked);
+            return true; // 예약은 유지하고 현재 점유만 반영해 셀 내부 접근을 다시 잇는다.
+        }
+
+        private bool CanDynamicStep(HexCoordinates from, HexCoordinates to)
+        {
+            if (cellTargets == null || !cellTargets.TryGetValue(from, out var a) || a == null ||
+                !cellTargets.TryGetValue(to, out var b) || b == null || b.Kind == HexCastleCellKind.Palace) return false;
+            if (from == to) return a.CanTraverse(HexCastleTraversalFaction.Assault);
+            for (var d = 0; d < 6; d++)
+                if (from.Neighbor(d) == to) return HexRoutePlanner.CanTraverseStep(a, b, d, HexCastleTraversalFaction.Assault);
+            return false;
+        }
+
+        private bool CanFinishCurrentEdge()
+        {
+            if (IsInSafeMotion) return true;
+            return movementPath != null && pathIndex < movementPath.Count - 1 &&
+                CanDynamicStep(CurrentCoordinates, movementPath[pathIndex + 1]);
+        }
+
+        private void CheckNoProgress()
+        {
+            var grace = Mathf.Max(1.5f, Mathf.Max(attackInterval * 2f, cellSize * 3.4641016f / EffectiveMoveSpeed));
+            if (Time.time - LastActualProgressTime < grace || Time.time < retryNotBefore) return;
+            MarkNoProgress(HexAssaultFailureReason.NoProgress);
+        }
+
+        private void MarkNoProgress(HexAssaultFailureReason reason)
+        {
+            LastDecisionReason = reason;
+            if (!RecoveryRequested)
+            {
+                if (activePlan.SlotLease.IsValid) { avoidSlot = activePlan.SlotLease.Key; hasAvoidSlot = true; avoidSlotUntil = Time.time + 1.5f; }
+                assaultWorld.Record(HexAssaultTraceKind.NoProgressEscalated, this, currentTarget.InstanceId, activePlan.SlotLease, reason);
+            }
+            RecoveryRequested = true; ExecutionState = HexAssaultExecutionState.Recovering;
+            strategicDecisionRequested = true;
+            // No immediate flag here: repeated failures cannot bypass the retry deadline.
+            animationDriver?.PlayIdle();
+        }
+
+        public bool ShouldAvoidSlot(HexAttackSlotKey key) => RecoveryRequested && hasAvoidSlot && Time.time < avoidSlotUntil && key == avoidSlot;
+        public void NotifyWorldChange(HexCoordinates changed, bool topologyChanged, bool ownTarget)
+        {
+            var affectsPath = false;
+            if (topologyChanged)
+                for (var i = pathIndex; i < movementPath.Count; i++)
+                    if (movementPath[i].DistanceTo(changed) <= 1) { affectsPath = true; break; }
+            if (!ownTarget && !affectsPath && CurrentCoordinates.DistanceTo(changed) > 6)
+            {
                 return;
             }
 
-            animationDriver?.PlayIdle();
-            FaceTowards(ResolveTargetPosition(currentTarget), deltaTime);
-            if (Time.time >= nextAttackTime)
-            {
-                StartDynamicAttack(currentTarget);
-            }
+            RouteCostReviewRequested = true;
+            strategicDecisionRequested = true;
+            retryNotBefore = 0f;
+            nextAwarenessAt = 0f;
+            if (IsInSafeMotion && !currentTarget.IsValid)
+                assaultWorld.Record(HexAssaultTraceKind.MotionSegmentPreserved, this, currentTarget.InstanceId, activePlan.SlotLease, HexAssaultFailureReason.TargetInvalid);
         }
+
+        public bool TryRetainPlan(HexCastleAssaultTarget target, int version, out HexCastleAssaultDecision plan)
+        {
+            plan = default;
+            if (RecoveryRequested || !activePlan.SlotLease.IsValid || activePlan.PlanKind != HexAssaultPlanKind.Attack ||
+                activePlan.Target.InstanceId != target.InstanceId || activePlan.TargetCell != target.Coordinates ||
+                !assaultWorld.SlotAllocator.Owns(this, activePlan.SlotLease) ||
+                !assaultWorld.CanAttackFromPosition(this, target, activePlan.SlotLease.Key)) return false;
+            for (var i = pathIndex; i + 1 < movementPath.Count; i++)
+                if (!CanDynamicStep(movementPath[i], movementPath[i + 1])) return false;
+            plan = new HexCastleAssaultDecision(target, movementPath, activePlan.Approach, RouteId, RouteSector,
+                version, currentIntent, currentSupportAction, activePlan.SlotLease, activePlan.FinalApproach, activePlan.PlanKind);
+            return true;
+        }
+
+        public bool TryRetainHold(int version, out HexCastleAssaultDecision plan)
+        {
+            plan = default;
+            if (!activePlan.SlotLease.IsValid || activePlan.PlanKind != HexAssaultPlanKind.Hold ||
+                !assaultWorld.SlotAllocator.Owns(this, activePlan.SlotLease)) return false;
+            plan = new HexCastleAssaultDecision(default, movementPath, activePlan.Approach, RouteId, RouteSector,
+                version, HexCastleAssaultIntentKind.HoldPosition, slotLease: activePlan.SlotLease,
+                finalApproach: activePlan.FinalApproach, planKind: HexAssaultPlanKind.Hold);
+            return true;
+        }
+        private int DamageBand() => Mathf.Max(1, Mathf.RoundToInt(EstimatedDamagePerSecond / 10f));
+        private int SpeedBand() => Mathf.Max(1, Mathf.RoundToInt(EffectiveMoveSpeed * 4f));
 
         private void TickLegacyRuntime(float deltaTime)
         {
@@ -776,6 +1111,7 @@ namespace ProjectMT.Contents.CastleRaidHex
             }
 
             ally.ApplySupport(currentSupportAction, aiProfile);
+            LastActualProgressTime = Time.time;
             assaultWorld?.CommitSupportDecision(
                 this,
                 ally,
@@ -799,6 +1135,8 @@ namespace ProjectMT.Contents.CastleRaidHex
             }
 
             ExpectedDefenseLayer = Mathf.Max(0, ExpectedDefenseLayer - 1);
+            HasSelectedInitialWall = false;
+            RouteCostReviewRequested = true;
             RequestStrategicDecision(true);
         }
 
@@ -808,6 +1146,9 @@ namespace ProjectMT.Contents.CastleRaidHex
             {
                 return false;
             }
+
+            if (dynamicRuntime && activePlan.SlotLease.IsValid && target.Kind != HexCastleAssaultTargetKind.Ally)
+                return assaultWorld != null && assaultWorld.CanAttackFromSlot(this, target, activePlan.SlotLease);
 
             if (target.Kind == HexCastleAssaultTargetKind.Palace)
             {
@@ -967,6 +1308,7 @@ namespace ProjectMT.Contents.CastleRaidHex
                 damage = passiveRuntime.ResolveOutgoingDamage(damage, pendingTarget);
                 damage *= assaultWorld?.ResolvePassiveDamageMultiplier(pendingTarget) ?? 1f;
                 var wasAlive = pendingTarget.IsAlive;
+                var healthBefore = pendingTarget.CurrentHealth;
                 if (wasAlive && damage > 0f) attackAudioPool?.Play(attackSfx, transform.position); // 실제 공격 Marker에서만 재생
                 if (pendingTarget.Structure != null)
                 {
@@ -977,6 +1319,11 @@ namespace ProjectMT.Contents.CastleRaidHex
                     pendingTarget.Defender?.ApplyDamage(damage, pendingAttackPosition);
                 }
 
+                if (pendingTarget.CurrentHealth < healthBefore)
+                {
+                    LastActualProgressTime = Time.time;
+                    assaultWorld?.Record(HexAssaultTraceKind.AttackMarkerApplied, this, pendingTarget.InstanceId, activePlan.SlotLease);
+                }
                 var destroyed = wasAlive && !pendingTarget.IsAlive;
                 passiveRuntime.NotifyBasicAttackHit(pendingTarget, destroyed);
                 if (destroyed)
@@ -1011,6 +1358,7 @@ namespace ProjectMT.Contents.CastleRaidHex
 
         private bool CanAssaultTraverse(HexCoordinates coordinates)
         {
+            if (dynamicRuntime) return CanDynamicStep(CurrentCoordinates, coordinates);
             return cellTargets == null ||
                    !cellTargets.TryGetValue(coordinates, out var cellTarget) ||
                    cellTarget == null || cellTarget.CanTraverse(HexCastleTraversalFaction.Assault);
@@ -1066,7 +1414,7 @@ namespace ProjectMT.Contents.CastleRaidHex
 
         private float ResolveDecisionSpread()
         {
-            return Mathf.Abs(GetInstanceID() % 9) / 8f * 0.08f;
+            return assaultWorld != null ? assaultWorld.ResolveDecisionSpread(this) : 0f;
         }
 
         private static bool IsCommitmentIntent(HexCastleAssaultIntentKind intent)

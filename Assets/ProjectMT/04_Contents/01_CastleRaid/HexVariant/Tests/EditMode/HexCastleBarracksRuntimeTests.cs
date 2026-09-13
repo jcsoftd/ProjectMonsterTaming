@@ -24,10 +24,12 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
         }
 
         [Test]
-        public void KnightBarracks_ProducesOneEveryTwentySecondsUntilLocalEightCap()
+        public void KnightBarracks_ProducesOneEveryTenSecondsUntilLocalEightCap()
         {
             var setup = CreateSetup(HexCastleBuildingRole.KnightBarracks);
             var tuning = HexCastleThemeOneTuning.CreateDraftDefaults();
+            Assert.That(tuning.KnightRefillInterval, Is.EqualTo(10f));
+            Assert.That(tuning.KnightMaximumNearbyCount, Is.EqualTo(8));
             setup.Barracks.Configure(setup.Structure, setup.World, tuning);
 
             setup.Barracks.Tick(tuning.KnightRefillInterval);
@@ -44,18 +46,20 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
             Assert.That(setup.World.CountAlive(
                 HexCastleGarrisonUnitRole.Knight,
                 setup.Structure.Coordinates,
-                tuning.KnightSearchRadius), Is.EqualTo(8));
+                tuning.KnightSearchRadius), Is.EqualTo(tuning.KnightMaximumNearbyCount));
 
             setup.Barracks.Tick(tuning.KnightRefillInterval);
-            Assert.That(setup.Barracks.TotalSpawned, Is.EqualTo(8));
+            Assert.That(setup.Barracks.TotalSpawned, Is.EqualTo(tuning.KnightMaximumNearbyCount));
             Assert.That(setup.Barracks.IsProducing, Is.False);
         }
 
         [Test]
-        public void FarmerBarracks_UsesSameTwentySecondLocalEightCap()
+        public void FarmerBarracks_ProducesEveryThirtySecondsUntilLocalFourCap()
         {
             var setup = CreateSetup(HexCastleBuildingRole.FarmerBarracks);
             var tuning = HexCastleThemeOneTuning.CreateDraftDefaults();
+            Assert.That(tuning.FarmerSpawnInterval, Is.EqualTo(30f));
+            Assert.That(tuning.FarmerMaximumNearbyCount, Is.EqualTo(4));
             setup.Barracks.Configure(setup.Structure, setup.World, tuning);
 
             for (var index = 0; index < tuning.FarmerMaximumNearbyCount + 2; index++)
@@ -66,8 +70,8 @@ namespace ProjectMT.Contents.CastleRaidHex.Tests
             Assert.That(setup.World.CountAlive(
                 HexCastleGarrisonUnitRole.Farmer,
                 setup.Structure.Coordinates,
-                tuning.FarmerSearchRadius), Is.EqualTo(8));
-            Assert.That(setup.Barracks.TotalSpawned, Is.EqualTo(8));
+                tuning.FarmerSearchRadius), Is.EqualTo(tuning.FarmerMaximumNearbyCount));
+            Assert.That(setup.Barracks.TotalSpawned, Is.EqualTo(tuning.FarmerMaximumNearbyCount));
             Assert.That(setup.Barracks.IsProducing, Is.False);
         }
 

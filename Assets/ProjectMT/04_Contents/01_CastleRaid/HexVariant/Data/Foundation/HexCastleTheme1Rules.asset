@@ -34,13 +34,13 @@ MonoBehaviour:
     goldRewardValue: 30
     equipmentRewardValue: 60
     keyRewardValue: 30
-    knightRefillInterval: 20
+    knightRefillInterval: 10
     knightSearchRadius: 10
     knightMaximumNearbyCount: 8
     knightsPerRefill: 1
-    farmerSpawnInterval: 20
+    farmerSpawnInterval: 30
     farmerSearchRadius: 10
-    farmerMaximumNearbyCount: 8
+    farmerMaximumNearbyCount: 4
     farmersPerSpawn: 1
     knightHealth: 180
     knightAttackDamage: 18

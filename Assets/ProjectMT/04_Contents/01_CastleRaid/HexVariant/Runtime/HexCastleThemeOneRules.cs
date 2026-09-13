@@ -226,14 +226,14 @@ namespace ProjectMT.Contents.CastleRaidHex
         [SerializeField, InspectorName("골드 건물 보상"), Min(0)] private int goldRewardValue = 30;
         [SerializeField, InspectorName("장비 건물 보상"), Min(0)] private int equipmentRewardValue = 60;
         [SerializeField, InspectorName("열쇠 건물 보상"), Min(0)] private int keyRewardValue = 30;
-        [SerializeField, InspectorName("기사 생산 시간"), Min(0.1f)] private float knightRefillInterval = 20f;
+        [SerializeField, InspectorName("기사 생산 시간"), Min(0.1f)] private float knightRefillInterval = 10f;
         [SerializeField, InspectorName("기사 지역 반경 칸 수"), Min(1)] private int knightSearchRadius = 10;
         [FormerlySerializedAs("knightRefillThreshold")]
         [SerializeField, InspectorName("기사 지역 최대 수"), Min(1)] private int knightMaximumNearbyCount = 8;
         [SerializeField, InspectorName("한 번에 생산할 기사 수"), Min(1)] private int knightsPerRefill = 1;
-        [SerializeField, InspectorName("농부 생산 시간"), Min(0.1f)] private float farmerSpawnInterval = 20f;
+        [SerializeField, InspectorName("농부 생산 시간"), Min(0.1f)] private float farmerSpawnInterval = 30f;
         [SerializeField, InspectorName("농부 지역 반경 칸 수"), Min(1)] private int farmerSearchRadius = 10;
-        [SerializeField, InspectorName("농부 지역 최대 수"), Min(1)] private int farmerMaximumNearbyCount = 8;
+        [SerializeField, InspectorName("농부 지역 최대 수"), Min(1)] private int farmerMaximumNearbyCount = 4;
         [SerializeField, InspectorName("한 번에 소환할 농부 수"), Min(1)] private int farmersPerSpawn = 1;
         [SerializeField, InspectorName("기사 체력"), Min(1f)] private float knightHealth = 180f;
         [SerializeField, InspectorName("기사 공격력"), Min(0f)] private float knightAttackDamage = 18f;
@@ -575,12 +575,12 @@ namespace ProjectMT.Contents.CastleRaidHex
             }
 
             if (KnightSearchRadius != 10 || FarmerSearchRadius != 10 ||
-                KnightMaximumNearbyCount != 8 || FarmerMaximumNearbyCount != 8 ||
-                !Mathf.Approximately(KnightRefillInterval, 20f) ||
-                !Mathf.Approximately(FarmerSpawnInterval, 20f) ||
+                KnightMaximumNearbyCount != 8 || FarmerMaximumNearbyCount != 4 ||
+                !Mathf.Approximately(KnightRefillInterval, 10f) ||
+                !Mathf.Approximately(FarmerSpawnInterval, 30f) ||
                 KnightsPerRefill != 1 || FarmersPerSpawn != 1)
             {
-                throw new InvalidOperationException("기사·농부 병영은 10칸 안 최대 8명, 20초당 1명 생산 계약이어야 합니다.");
+                throw new InvalidOperationException("기사 병영은 10칸 안 최대 8명·10초당 1명, 농부병영은 최대 4명·30초당 1명 생산 계약이어야 합니다.");
             }
 
             if (GarrisonMinimumTargetSearchInterval < 1f ||

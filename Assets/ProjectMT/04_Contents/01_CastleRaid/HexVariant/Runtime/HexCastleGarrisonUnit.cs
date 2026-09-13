@@ -705,7 +705,7 @@ namespace ProjectMT.Contents.CastleRaidHex
         {
             var range = Mathf.Max(0f, maximumResponseDelay - minimumResponseDelay);
             var score = PositiveModulo(
-                spawnSequence * 37 + candidate.GetInstanceID() * 13,
+                spawnSequence * 37 + candidate.StableSpawnOrder * 13,
                 1000) / 999f;
             return minimumResponseDelay + range * score;
         }

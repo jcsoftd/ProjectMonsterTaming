@@ -74,6 +74,64 @@ namespace ProjectMT.Contents.CastleRaidHex
             BindStructureAlerts();
         }
 
+        public void SpawnInitialGarrison(HexCastleDifficultyProfile difficultyProfile)
+        {
+            SpawnInitial(
+                HexCastleGarrisonUnitRole.Knight,
+                HexCastleBuildingRole.KnightBarracks,
+                difficultyProfile.InitialKnightCount);
+            SpawnInitial(
+                HexCastleGarrisonUnitRole.Farmer,
+                HexCastleBuildingRole.FarmerBarracks,
+                difficultyProfile.InitialFarmerCount);
+
+            void SpawnInitial(
+                HexCastleGarrisonUnitRole role,
+                HexCastleBuildingRole barracksRole,
+                int count)
+            {
+                if (count <= 0)
+                {
+                    return;
+                }
+
+                var origins = cells.Values
+                    .Where(value => value != null && value.BuildingRole == barracksRole)
+                    .OrderBy(value => value.DefenseLayer)
+                    .ThenBy(value => value.Coordinates)
+                    .Select(value => value.Coordinates)
+                    .ToArray();
+                if (origins.Length == 0 && role == HexCastleGarrisonUnitRole.Farmer)
+                {
+                    // 2중벽의 초기 농부는 별도 농부병영 없이 왕궁 수비용 기사병영에서 주둔을 시작한다.
+                    origins = cells.Values
+                        .Where(value => value != null &&
+                                        value.BuildingRole == HexCastleBuildingRole.KnightBarracks)
+                        .OrderBy(value => value.DefenseLayer)
+                        .ThenBy(value => value.Coordinates)
+                        .Select(value => value.Coordinates)
+                        .ToArray();
+                }
+
+                if (origins.Length == 0)
+                {
+                    throw new InvalidOperationException($"초기 {role} 수비대의 병영이 없습니다.");
+                }
+
+                var spawned = 0;
+                for (var index = 0; index < count; index++)
+                {
+                    spawned += Spawn(role, origins[index % origins.Length], 1);
+                }
+
+                if (spawned != count)
+                {
+                    throw new InvalidOperationException(
+                        $"난이도 {difficultyProfile.Level} 초기 {role} 소환 수가 부족합니다: {spawned}/{count}");
+                }
+            }
+        }
+
         public int CountAlive(
             HexCastleGarrisonUnitRole role,
             HexCoordinates origin,
@@ -120,6 +178,30 @@ namespace ProjectMT.Contents.CastleRaidHex
 
             return spawned;
         }
+
+#if UNITY_EDITOR
+        public HexCastleGarrisonUnit EditorSpawnSimulationUnit(
+            HexCastleGarrisonUnitRole role,
+            HexCoordinates coordinates)
+        {
+            if (!IsConfigured || !cells.TryGetValue(coordinates, out var cell) || cell == null ||
+                cell.IsBlocked && cell.GateRole != HexCastleGateRole.OpenDefenderPassage)
+            {
+                return null;
+            }
+
+            var prefab = role == HexCastleGarrisonUnitRole.Knight
+                ? catalog.ResolveKnight(seed, spawnSequence)
+                : catalog.ResolveFarmer();
+            if (prefab == null)
+            {
+                return null;
+            }
+
+            CreateUnit(role, coordinates, prefab);
+            return units.Count > 0 ? units[units.Count - 1] : null;
+        }
+#endif
 
         public bool TryReserveProduction(
             HexCastleBarracksRuntime owner,
@@ -231,7 +313,7 @@ namespace ProjectMT.Contents.CastleRaidHex
             var reservedApproaches = new HashSet<HexCoordinates>(responseReservations.Values
                 .Where(value => value.Target != null && value.Target.GetInstanceID() == targetId)
                 .Select(value => value.Approach));
-            var startDirection = PositiveModulo(unit.SpawnSequence * 5 + targetId, HexCoordinates.Directions.Length);
+            var startDirection = PositiveModulo(unit.SpawnSequence * 5 + target.StableSpawnOrder, HexCoordinates.Directions.Length);
             for (var index = 0; index < HexCoordinates.Directions.Length; index++)
             {
                 var direction = PositiveModulo(startDirection + index, HexCoordinates.Directions.Length);

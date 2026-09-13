@@ -140,6 +140,7 @@ InitTestScene*.unity*
 
 # Local JCSoft Hera Connector junction; package source stays outside this project.
 /Packages/com.notnull92.hera-agent-unity/
+/artifacts/
 /artifacts/chatgpt-hybrid-mcp/
 
 # Local Codex backups, diagnostics, and temporary outputs.

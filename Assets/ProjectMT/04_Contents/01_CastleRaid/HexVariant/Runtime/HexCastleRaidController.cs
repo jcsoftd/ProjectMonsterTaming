@@ -284,12 +284,37 @@ namespace ProjectMT.Contents.CastleRaidHex
 
             var deployedIndex = selectedUnitIndex;
             var snapshot = DeploymentUnits[deployedIndex];
+            var unit = DeploySnapshotAtCell(snapshot, coordinates);
+            if (unit == null)
+            {
+                return false;
+            }
+
+            remainingDeployments[deployedIndex]--;
+            deployedCount++;
+            if (!battleStarted)
+            {
+                battleStarted = true;
+                battleHudView?.SetTimer(remainingBattleSeconds, true);
+            }
+            selectedUnitIndex = remainingDeployments[deployedIndex] > 0 ? deployedIndex : -1;
+            SetStatus(remainingDeployments[deployedIndex] > 0
+                ? $"{ResolveUnitLabel(deployedIndex)} {remainingDeployments[deployedIndex]}마리 남음"
+                : $"{ResolveUnitLabel(deployedIndex)} 배치 완료");
+            UpdateHud();
+            return true;
+        }
+
+        private HexCastleAssaultUnit DeploySnapshotAtCell(
+            BattleUnitSnapshot snapshot,
+            HexCoordinates coordinates)
+        {
             var assaultPrefab = snapshot?.RuntimeAssetSet?.VisualAdapterPrefab;
             if (snapshot == null || assaultPrefab == null)
             {
                 Debug.LogError($"Hex Castle Raid에 정식 몬스터 실행 자산이 없습니다. Unit={snapshot?.UnitId}");
                 SetStatus("몬스터 실행 자산을 확인해주세요");
-                return false;
+                return null;
             }
 
             var spawnPoint = stageInstance.transform.position + coordinates.ToWorld(HexSpatialContract.CellOuterRadius);
@@ -299,7 +324,7 @@ namespace ProjectMT.Contents.CastleRaidHex
             var instance = poolScope.Rent(assaultPrefab, spawnPoint, rotation, stageInstance.transform);
             if (instance == null)
             {
-                return false;
+                return null;
             }
 
             var unit = instance.GetComponent<HexCastleAssaultUnit>() ??
@@ -319,21 +344,8 @@ namespace ProjectMT.Contents.CastleRaidHex
             unit.Died += HandleUnitDied;
             combatWorld.RegisterAssaultUnit(unit);
             activeUnits.Add(unit);
-
-            remainingDeployments[deployedIndex]--;
-            deployedCount++;
             sfxPool?.Play(deploymentSfx, unit.transform.position);
-            if (!battleStarted)
-            {
-                battleStarted = true;
-                battleHudView?.SetTimer(remainingBattleSeconds, true);
-            }
-            selectedUnitIndex = remainingDeployments[deployedIndex] > 0 ? deployedIndex : -1;
-            SetStatus(remainingDeployments[deployedIndex] > 0
-                ? $"{ResolveUnitLabel(deployedIndex)} {remainingDeployments[deployedIndex]}마리 남음"
-                : $"{ResolveUnitLabel(deployedIndex)} 배치 완료");
-            UpdateHud();
-            return true;
+            return unit;
         }
 
         public void Cancel()
@@ -684,60 +696,7 @@ namespace ProjectMT.Contents.CastleRaidHex
 
         private void SpawnInitialGarrison(HexCastleDifficultyProfile difficultyProfile)
         {
-            SpawnInitial(
-                HexCastleGarrisonUnitRole.Knight,
-                HexCastleBuildingRole.KnightBarracks,
-                difficultyProfile.InitialKnightCount);
-            SpawnInitial(
-                HexCastleGarrisonUnitRole.Farmer,
-                HexCastleBuildingRole.FarmerBarracks,
-                difficultyProfile.InitialFarmerCount);
-
-            void SpawnInitial(
-                HexCastleGarrisonUnitRole role,
-                HexCastleBuildingRole barracksRole,
-                int count)
-            {
-                if (count <= 0)
-                {
-                    return;
-                }
-
-                var origins = runtimeCells.Values
-                    .Where(value => value != null && value.BuildingRole == barracksRole)
-                    .OrderBy(value => value.DefenseLayer)
-                    .ThenBy(value => value.Coordinates)
-                    .Select(value => value.Coordinates)
-                    .ToArray();
-                if (origins.Length == 0 && role == HexCastleGarrisonUnitRole.Farmer)
-                {
-                    // 2중벽의 초기 농부는 별도 농부병영 없이 왕궁 수비용 기사병영에서 주둔을 시작한다.
-                    origins = runtimeCells.Values
-                        .Where(value => value != null &&
-                                        value.BuildingRole == HexCastleBuildingRole.KnightBarracks)
-                        .OrderBy(value => value.DefenseLayer)
-                        .ThenBy(value => value.Coordinates)
-                        .Select(value => value.Coordinates)
-                        .ToArray();
-                }
-
-                if (origins.Length == 0)
-                {
-                    throw new InvalidOperationException($"초기 {role} 수비대의 병영이 없습니다.");
-                }
-
-                var spawned = 0;
-                for (var index = 0; index < count; index++)
-                {
-                    spawned += garrisonWorld.Spawn(role, origins[index % origins.Length], 1);
-                }
-
-                if (spawned != count)
-                {
-                    throw new InvalidOperationException(
-                        $"난이도 {difficultyProfile.Level} 초기 {role} 소환 수가 부족합니다: {spawned}/{count}");
-                }
-            }
+            garrisonWorld.SpawnInitialGarrison(difficultyProfile);
         }
 
         private void ConfigureHud()
@@ -1286,6 +1245,31 @@ namespace ProjectMT.Contents.CastleRaidHex
         }
 
 #if UNITY_EDITOR
+        public HexCastleAssaultUnit EditorDeploySimulationUnit(
+            BattleUnitSnapshot snapshot,
+            HexCoordinates coordinates,
+            HexCastleAssaultAIProfile profileOverride)
+        {
+            if (!IsRunning || snapshot == null ||
+                !runtimeCells.TryGetValue(coordinates, out var cell) || cell == null ||
+                cell.Kind != HexCastleCellKind.Deployment || cell.InitialBlocked)
+            {
+                return null;
+            }
+
+            var unit = DeploySnapshotAtCell(snapshot, coordinates);
+            if (unit == null) return null;
+            unit.EditorOverrideAIProfile(profileOverride);
+            deployedCount++;
+            if (!battleStarted)
+            {
+                battleStarted = true;
+                battleHudView?.SetTimer(remainingBattleSeconds, true);
+            }
+            UpdateHud();
+            return unit;
+        }
+
         public void EditorConfigure(
             HexCastleThemeOneRules rules,
             HexCastleVisualSet runtimeVisualSet,

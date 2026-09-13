@@ -219,8 +219,8 @@ namespace ProjectMT.Contents.CastleRaidHex.PlayMode.Tests
                 Assert.That(liveBarracks.Any(value =>
                     value.UnitRole == HexCastleGarrisonUnitRole.Knight &&
                     value.IsProducing &&
-                    value.RemainingProductionSeconds > 17.5f &&
-                    value.RemainingProductionSeconds <= 20f), Is.True,
+                    value.RemainingProductionSeconds > 7.5f &&
+                    value.RemainingProductionSeconds <= 10f), Is.True,
                     "폭발 지뢰 예고 검증 중에도 기사 병영 생산은 계속 진행돼야 합니다.");
 
                 var liveBallistas = controller.ActiveStage
@@ -391,7 +391,10 @@ namespace ProjectMT.Contents.CastleRaidHex.PlayMode.Tests
                 Assert.That(assault.CurrentTarget.IsValid, Is.True);
                 Assert.That(assault.CurrentTarget.Structure, Is.Not.Null);
                 Assert.That(assault.CurrentTarget.Structure.DefenseLayer, Is.EqualTo(3));
-                Assert.That(controller.ActiveAssaultWorld.CachedRouteFieldCount, Is.GreaterThan(0));
+                Assert.That(controller.ActiveAssaultWorld.SharedFrontRouteBuildCount, Is.GreaterThan(0),
+                    "정식 배치도 부대 대표 전면 경로를 생성해야 한다.");
+                Assert.That(controller.ActiveAssaultWorld.ApproachPlanner.SharedSearchBuildCount, Is.GreaterThan(0),
+                    "정식 병력의 실제 접근 탐색이 부대 공유 경로를 사용해야 한다.");
 
                 var wall = controller.ActiveStage
                     .GetComponentsInChildren<HexCastleCellRuntime>(true)

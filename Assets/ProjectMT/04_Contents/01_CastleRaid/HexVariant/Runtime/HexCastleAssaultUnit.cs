@@ -379,7 +379,7 @@ namespace ProjectMT.Contents.CastleRaidHex
             }
             else
             {
-                // Do not move the Transform back to its last logical cell.
+                // Transform을 이전 논리 셀로 되돌리지 않는다.
                 motionActive = false;
                 movementPath = new[] { CurrentCoordinates }; pathIndex = 0;
                 ExecutionState = RecoveryRequested ? HexAssaultExecutionState.Recovering : HexAssaultExecutionState.Holding;
@@ -844,7 +844,7 @@ namespace ProjectMT.Contents.CastleRaidHex
             if (activePlan.PlanKind == HexAssaultPlanKind.Hold)
             {
                 ExecutionState = HexAssaultExecutionState.Holding;
-                strategicDecisionRequested = true; // retryNotBefore is still authoritative.
+                strategicDecisionRequested = true; // 재판단 시점은 대기 시간이 결정한다.
                 CheckNoProgress(); animationDriver?.PlayIdle(); return;
             }
             if (!currentTarget.IsValid)
@@ -977,7 +977,7 @@ namespace ProjectMT.Contents.CastleRaidHex
             }
             RecoveryRequested = true; ExecutionState = HexAssaultExecutionState.Recovering;
             strategicDecisionRequested = true;
-            // No immediate flag here: repeated failures cannot bypass the retry deadline.
+            // 연속 실패도 재시도 대기 시간을 지킨다.
             animationDriver?.PlayIdle();
         }
 
